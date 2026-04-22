@@ -1,0 +1,553 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Plane, Coins, TrendingUp, Users, Timer, AlertCircle } from 'lucide-react';
+
+interface AviatorGameProps {
+  onClose: () => void;
+  userBalance: number;
+  onBet: (amount: number, isWin: boolean, winAmount: number) => Promise<boolean>;
+  showVIPUI?: boolean;
+}
+
+type GameState = 'waiting' | 'flying' | 'crashed';
+
+interface BetSlot {
+  amount: number;
+  cashed: boolean;
+  won: number;
+}
+
+interface FakeFeedItem {
+  id: number;
+  username: string;
+  bet: number;
+  multiplier: number;
+  result: 'win' | 'loss';
+}
+
+const FAKE_USERS = [
+  'LuckyRider',
+  'SkyAce',
+  'MoonCrash',
+  'JetMaster',
+  'CashFly',
+  'TurboSpin',
+  'GoldPilot',
+  'NightHawk',
+  'AeroKing',
+  'FlashBet'
+];
+
+const AviatorGame: React.FC<AviatorGameProps> = ({
+  onClose,
+  userBalance,
+  onBet,
+  showVIPUI = false
+}) => {
+  const [betInputs, setBetInputs] = useState([10, 10]);
+  const [bets, setBets] = useState<Array<BetSlot | null>>([null, null]);
+  const [state, setState] = useState<GameState>('waiting');
+  const [countdown, setCountdown] = useState(6);
+  const [multiplier, setMultiplier] = useState(1);
+  const [crashPoint, setCrashPoint] = useState(1.15);
+  const [history, setHistory] = useState<number[]>([1.2, 1.56, 2.8, 1.03, 4.4, 1.9]);
+  const [feed, setFeed] = useState<FakeFeedItem[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  // Visual time accumulator — always ticks at the same visual rate regardless of crash point
+  const [visualTime, setVisualTime] = useState(0);
+
+  const flyingStartedAtRef = useRef<number>(0);
+  const gameLoopRef = useRef<number | null>(null);
+  const countdownRef = useRef<number | null>(null);
+  const feedRef = useRef<number | null>(null);
+
+  const activeBets = useMemo(() => bets.filter(Boolean) as BetSlot[], [bets]);
+
+  // --- KEY FIX ---
+  // planePosition is driven purely by how long the round has been running (visualTime),
+  // NOT by what the crash point will be. This makes the animation speed identical
+  // every round, so players cannot predict a short/long flight from how fast the plane moves.
+  //
+  // Visual curve: x grows linearly, y curves upward with a gentle exponential.
+  // The plane fills the canvas over ~12 seconds of "visual flight time".
+  // Real crash can come at any moment — the plane just freezes wherever it is.
+  const planePosition = useMemo(() => {
+    const VISUAL_DURATION = 12; // seconds until plane would reach the top-right corner
+    const t = Math.min(visualTime / VISUAL_DURATION, 1); // 0..1 visual progress
+
+    const startX = 6;
+    const endX = 90;
+    const startY = 92;
+    const endY = 10;
+
+    const x = startX + (endX - startX) * t;
+    // Use power curve so it accelerates upward naturally
+    const y = startY + (endY - startY) * Math.pow(t, 1.5);
+
+    return { x, y };
+  }, [visualTime]);
+
+  const clearTimers = () => {
+    if (gameLoopRef.current) {
+      window.clearInterval(gameLoopRef.current);
+      gameLoopRef.current = null;
+    }
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    if (feedRef.current) {
+      window.clearInterval(feedRef.current);
+      feedRef.current = null;
+    }
+  };
+
+  const randomCrashPoint = () => {
+    const r = Math.random();
+    if (r < 0.02) return 1;
+    return Math.max(1, 0.99 / (1 - r));
+  };
+
+  const appendFeed = () => {
+    const isWin = Math.random() > 0.42;
+    const bet = Number((5 + Math.random() * 95).toFixed(2));
+    const mult = isWin ? Number((1.1 + Math.random() * 3.8).toFixed(2)) : Number((1 + Math.random() * 0.8).toFixed(2));
+    const entry: FakeFeedItem = {
+      id: Date.now() + Math.floor(Math.random() * 999),
+      username: FAKE_USERS[Math.floor(Math.random() * FAKE_USERS.length)],
+      bet,
+      multiplier: mult,
+      result: isWin ? 'win' : 'loss'
+    };
+
+    setFeed((prev) => [entry, ...prev].slice(0, 12));
+  };
+
+  const startRound = () => {
+    setState('flying');
+    setMultiplier(1);
+    setVisualTime(0);
+    const crash = Number(randomCrashPoint().toFixed(2));
+    setCrashPoint(crash);
+    flyingStartedAtRef.current = performance.now();
+
+    if (gameLoopRef.current) {
+      window.clearInterval(gameLoopRef.current);
+    }
+
+    gameLoopRef.current = window.setInterval(() => {
+      const elapsedSec = (performance.now() - flyingStartedAtRef.current) / 1000;
+
+      // Multiplier grows on its own natural curve (same formula as before)
+      const current = Math.exp(0.1 * elapsedSec);
+      setMultiplier(current);
+
+      // Visual time also ticks — but at a fixed, crash-point-agnostic rate
+      setVisualTime(elapsedSec);
+
+      if (current >= crash) {
+        window.clearInterval(gameLoopRef.current ?? undefined);
+        gameLoopRef.current = null;
+        setState('crashed');
+        setMultiplier(crash);
+        setHistory((prev) => [crash, ...prev].slice(0, 18));
+
+        setTimeout(() => {
+          setBets((prev) => prev.map((slot) => (slot?.cashed ? null : null)));
+          setState('waiting');
+          setCountdown(6);
+          setVisualTime(0);
+        }, 1700);
+      }
+    }, 65);
+  };
+
+  useEffect(() => {
+    if (state !== 'waiting') return;
+    if (countdownRef.current) window.clearInterval(countdownRef.current);
+
+    countdownRef.current = window.setInterval(() => {
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          window.clearInterval(countdownRef.current ?? undefined);
+          countdownRef.current = null;
+          startRound();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (countdownRef.current) {
+        window.clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
+    };
+  }, [state]);
+
+  useEffect(() => {
+    appendFeed();
+    appendFeed();
+
+    feedRef.current = window.setInterval(() => {
+      appendFeed();
+    }, 1700);
+
+    return () => clearTimers();
+  }, []);
+
+  const updateBetInput = (index: number, delta: number) => {
+    setBetInputs((prev) => {
+      const next = [...prev];
+      next[index] = Math.max(1, Number((next[index] + delta).toFixed(2)));
+      return next;
+    });
+  };
+
+  const setBetInputFromText = (index: number, value: string) => {
+    setBetInputs((prev) => {
+      const next = [...prev];
+      const parsed = Number(value);
+      if (value === '') {
+        next[index] = 0;
+      } else if (Number.isFinite(parsed)) {
+        next[index] = Math.max(0, Number(parsed.toFixed(2)));
+      }
+      return next;
+    });
+  };
+
+  const placeBet = async (index: number) => {
+    if (state !== 'waiting' || bets[index] || busy) return;
+
+    const amount = betInputs[index];
+    if (amount > userBalance) return;
+
+    setBusy(true);
+    const ok = await onBet(amount, false, 0);
+    if (ok) {
+      setBets((prev) => {
+        const next = [...prev];
+        next[index] = { amount, cashed: false, won: 0 };
+        return next;
+      });
+    }
+    setBusy(false);
+  };
+
+  const cancelBet = async (index: number) => {
+    const slot = bets[index];
+    if (!slot || state !== 'waiting' || busy) return;
+
+    setBusy(true);
+    const ok = await onBet(0, true, slot.amount);
+    if (ok) {
+      setBets((prev) => {
+        const next = [...prev];
+        next[index] = null;
+        return next;
+      });
+    }
+    setBusy(false);
+  };
+
+  const cashout = async (index: number) => {
+    const slot = bets[index];
+    if (!slot || slot.cashed || state !== 'flying' || busy) return;
+
+    const won = Number((slot.amount * multiplier).toFixed(2));
+    setBusy(true);
+    const ok = await onBet(0, true, won);
+
+    if (ok) {
+      setBets((prev) => {
+        const next = [...prev];
+        next[index] = { ...slot, cashed: true, won };
+        return next;
+      });
+    }
+    setBusy(false);
+  };
+
+  const handleSlotAction = (index: number) => {
+    const slot = bets[index];
+
+    if (state === 'waiting') {
+      if (slot) {
+        void cancelBet(index);
+      } else {
+        void placeBet(index);
+      }
+      return;
+    }
+
+    if (state === 'flying' && slot && !slot.cashed) {
+      void cashout(index);
+    }
+  };
+
+  const renderButtonText = (index: number) => {
+    const slot = bets[index];
+
+    if (state === 'waiting') {
+      return slot ? 'Cancel' : 'Bet';
+    }
+
+    if (state === 'flying') {
+      if (!slot) return 'Locked';
+      if (slot.cashed) return `+$${slot.won.toFixed(2)}`;
+      return `Cashout @ ${multiplier.toFixed(2)}x`;
+    }
+
+    return 'Next Round';
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
+      <div className={`rounded-2xl w-full max-w-4xl max-h-[95vh] overflow-hidden flex flex-col animate-popup-drop-in ${
+        showVIPUI ? 'vip-glass-card' : 'bg-[#0b0b12] border border-red-500/20'
+      }`}>
+        <div className="p-4 border-b border-white/10 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Plane className="text-red-400" size={22} />
+            <h3 className={`text-xl font-bold ${showVIPUI ? 'vip-gold-text' : 'text-red-400'}`}>Aviator NEXT</h3>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
+            <X size={22} />
+          </button>
+        </div>
+
+        <div className="p-4 overflow-y-auto grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-2 space-y-4">
+            <div className="rounded-2xl bg-gradient-to-b from-red-950/40 to-black border border-white/10 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2 text-sm text-gray-300">
+                  <Coins size={16} className="text-yellow-400" /> Balance: <span className="font-semibold text-white">${userBalance.toFixed(2)}</span>
+                </div>
+                <div className="text-xs text-gray-400 flex items-center gap-1">
+                  <Timer size={14} /> {state === 'waiting' ? `Starts in ${countdown}s` : state === 'flying' ? 'Live round' : 'Crashed'}
+                </div>
+              </div>
+
+              <div className="h-64 rounded-xl border border-red-500/20 bg-[#0a0a0f] flex flex-col items-center justify-center relative overflow-hidden">
+
+                {/* ── Sunray background radiating from bottom-left ── */}
+                <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 560 224" preserveAspectRatio="none" aria-hidden="true">
+                  <defs>
+                    {/* Radial fade so rays dim toward edges */}
+                    <radialGradient id="ray-fade" cx="0%" cy="100%" r="120%" gradientUnits="userSpaceOnUse">
+                      <stop offset="0%" stopColor="rgba(180,20,20,0.18)" />
+                      <stop offset="60%" stopColor="rgba(120,10,10,0.07)" />
+                      <stop offset="100%" stopColor="rgba(0,0,0,0)" />
+                    </radialGradient>
+                    <linearGradient id="aviator-area-gradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="rgba(220,38,38,0.85)" />
+                      <stop offset="100%" stopColor="rgba(100,10,10,0.25)" />
+                    </linearGradient>
+                  </defs>
+                  {/* 18 sunrays fanning from bottom-left origin */}
+                  {Array.from({ length: 18 }).map((_, i) => {
+                    const angle = -15 + i * 6; // degrees, spread from -15° to 87°
+                    const rad = (angle * Math.PI) / 180;
+                    const len = 900;
+                    const ox = 0, oy = 224;
+                    const ex = ox + Math.cos(rad) * len;
+                    const ey = oy - Math.sin(rad) * len;
+                    const half = 28;
+                    const ex2 = ox + Math.cos((angle + half / 2) * Math.PI / 180) * len;
+                    const ey2 = oy - Math.sin((angle + half / 2) * Math.PI / 180) * len;
+                    const ex3 = ox + Math.cos((angle - half / 2) * Math.PI / 180) * len;
+                    const ey3 = oy - Math.sin((angle - half / 2) * Math.PI / 180) * len;
+                    return (
+                      <polygon
+                        key={i}
+                        points={`${ox},${oy} ${ex2},${ey2} ${ex3},${ey3}`}
+                        fill={i % 2 === 0 ? 'rgba(160,10,10,0.10)' : 'rgba(0,0,0,0)'}
+                      />
+                    );
+                  })}
+                  {/* Radial overlay to add depth */}
+                  <rect x="0" y="0" width="560" height="224" fill="url(#ray-fade)" />
+                </svg>
+
+                {/* ── Flight curve SVG ── */}
+                <svg
+                  viewBox="0 0 100 100"
+                  className="absolute inset-0 w-full h-full"
+                  preserveAspectRatio="none"
+                  aria-hidden="true"
+                >
+                  {state !== 'waiting' && (() => {
+                    const { x, y } = planePosition;
+                    // Curve originates from bottom-left (0,100) and sweeps up to plane position
+                    // Control point lifts the mid-section for a realistic exponential arc
+                    const cpx = x * 0.35;
+                    const cpy = 100 - (100 - y) * 0.15;
+                    const areaD = `M 0 100 Q ${cpx} ${cpy} ${x} ${y} L ${x} 100 Z`;
+                    const lineD = `M 0 100 Q ${cpx} ${cpy} ${x} ${y}`;
+                    return (
+                      <>
+                        <path d={areaD} fill="url(#aviator-area-gradient)" />
+                        <path d={lineD} fill="none" stroke="rgba(248,113,113,1)" strokeWidth="0.8" />
+                      </>
+                    );
+                  })()}
+                </svg>
+
+                {/* ── SVG Airplane silhouette at plane tip ── */}
+                {state !== 'waiting' && (() => {
+                  const { x, y } = planePosition;
+                  // The plane SVG is 52×22 viewBox, positioned absolutely via % + CSS transform
+                  return (
+                    <svg
+  viewBox="0 0 52 22"
+  width="52"
+  height="22"
+  className="absolute"
+  style={{
+    left: `${x}%`,
+    top: `${y}%`,
+    transform: 'translate(-38%, -58%) rotate(-20deg)',
+    filter: 'drop-shadow(0 0 6px rgba(248,80,80,0.9)) hue-rotate(0deg) saturate(5)',
+    overflow: 'visible',
+  }}
+>
+  <image
+    href="https://ciuufyblgorvzqtdzevx.supabase.co/storage/v1/object/public/images/0.07383934100474543-Untitled%20design.svg"
+    width="52"
+    height="22"
+  />
+</svg>
+                  );
+                })()}
+
+                {/* ── Multiplier text — centered, large ── */}
+                <p className={`relative z-10 text-5xl font-black tracking-wide drop-shadow-lg ${state === 'crashed' ? 'text-red-500' : 'text-white'}`}
+                   style={{ textShadow: state === 'crashed' ? '0 0 24px rgba(239,68,68,0.8)' : '0 2px 16px rgba(0,0,0,0.8)' }}>
+                  {state === 'waiting' ? '1.00x' : `${multiplier.toFixed(2)}x`}
+                </p>
+                <p className="relative z-10 mt-1 text-xs text-gray-400 uppercase tracking-widest">
+                  {state === 'waiting' ? `Takeoff in ${countdown}s` : state === 'flying' ? 'Flying…' : `Crashed at ${crashPoint.toFixed(2)}x`}
+                </p>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {history.map((item, idx) => (
+                  <span
+                    key={`${item}-${idx}`}
+                    className={`text-xs px-2 py-1 rounded-full border ${item >= 2 ? 'text-green-300 border-green-400/40 bg-green-500/10' : 'text-red-300 border-red-400/40 bg-red-500/10'}`}
+                  >
+                    {item.toFixed(2)}x
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {[0, 1].map((index) => {
+                const slot = bets[index];
+                const isActionDisabled =
+                  busy ||
+                  state === 'crashed' ||
+                  (state === 'flying' && (!slot || slot.cashed));
+
+                return (
+                  <div key={index} className="rounded-xl bg-white/5 border border-white/10 p-3">
+                    <p className="text-xs text-gray-400 mb-2">Bet {index + 1}</p>
+                    <div className="flex items-center gap-2 mb-3">
+                      <button
+                        onClick={() => updateBetInput(index, -5)}
+                        className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20"
+                        disabled={!!slot || state !== 'waiting'}
+                      >
+                        -
+                      </button>
+                      <input
+                        type="number"
+                        min={1}
+                        step="0.01"
+                        value={betInputs[index]}
+                        onChange={(event) => setBetInputFromText(index, event.target.value)}
+                        onBlur={() => {
+                          if (betInputs[index] < 1) {
+                            setBetInputs((prev) => {
+                              const next = [...prev];
+                              next[index] = 1;
+                              return next;
+                            });
+                          }
+                        }}
+                        className="flex-1 h-9 rounded-lg bg-black/40 border border-yellow-400/40 text-yellow-300 text-sm font-semibold px-2 text-center outline-none focus:border-yellow-300 disabled:opacity-70"
+                        disabled={!!slot || state !== 'waiting'}
+                      />
+                      <button
+                        onClick={() => updateBetInput(index, 5)}
+                        className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20"
+                        disabled={!!slot || state !== 'waiting'}
+                      >
+                        +
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => handleSlotAction(index)}
+                      disabled={isActionDisabled}
+                      className={`w-full py-2.5 rounded-lg font-bold text-sm transition-all ${
+                        state === 'flying' && slot && !slot.cashed
+                          ? 'bg-yellow-400 text-black hover:bg-yellow-300'
+                          : slot && state === 'waiting'
+                            ? 'bg-gray-600 text-white hover:bg-gray-500'
+                            : 'bg-green-500 text-black hover:bg-green-400 disabled:bg-gray-700 disabled:text-gray-400'
+                      }`}
+                    >
+                      {renderButtonText(index)}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/10 p-3 flex items-start gap-2">
+              <AlertCircle size={16} className="text-yellow-300 mt-0.5" />
+              <p className="text-xs text-yellow-100/90">
+                Demo gambling vibe: this round uses simulated multipliers and activity feed. Your wallet updates through game bet / cashout actions.
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+            <div className="flex items-center justify-between mb-3">
+              <p className="font-semibold text-white flex items-center gap-2"><Users size={16} /> Live Bets</p>
+              <p className="text-xs text-gray-400">Fake lobby</p>
+            </div>
+
+            <div className="space-y-2 max-h-[470px] overflow-y-auto pr-1">
+              {feed.map((item) => (
+                <div key={item.id} className="rounded-lg border border-white/10 bg-black/35 p-2.5 text-sm">
+                  <div className="flex items-center justify-between">
+                    <p className="text-gray-200 font-medium">{item.username}</p>
+                    <p className={`text-xs font-semibold ${item.result === 'win' ? 'text-green-400' : 'text-red-400'}`}>
+                      {item.result.toUpperCase()}
+                    </p>
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-xs text-gray-400">
+                    <span>Bet ${item.bet.toFixed(2)}</span>
+                    <span className="flex items-center gap-1"><TrendingUp size={12} /> {item.multiplier.toFixed(2)}x</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <p className="text-[11px] text-gray-500 mt-3">
+              {activeBets.length > 0
+                ? `You have ${activeBets.length} active bet${activeBets.length > 1 ? 's' : ''}.`
+                : 'Place a bet during countdown to join next flight.'}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default AviatorGame;
